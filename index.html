@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Kvittering</title>
+<style>
+  :root {
+    --bg: #f3f1ec; --paper: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --rule: #e2dfd8;
+    --ok: #1f7a4d; --warn: #9a5b00; --warn-bg: #fff4e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --paper: #222220; --ink: #ecebe7; --muted: #a09e98; --rule: #3a3936;
+            --ok: #5cc493; --warn: #f0b45a; --warn-bg: #3a2c14; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 440px; margin: 0 auto; padding: 16px; }
+  .paper { background: var(--paper); border-radius: 12px; padding: 20px 18px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 12px; font-size: 13px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-variant-numeric: tabular-nums; }
+  td { padding: 6px 0; vertical-align: top; border-top: 1px solid var(--rule); }
+  td.amt { text-align: right; white-space: nowrap; padding-left: 12px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .total td { border-top: 2px solid var(--ink); font-weight: 700; font-size: 18px; padding-top: 10px; }
+  .vat td { border: 0; padding: 2px 0; color: var(--muted); font-size: 13px; }
+  .badge { margin-top: 16px; padding: 10px 12px; border-radius: 8px; font-size: 13px; background: var(--warn-bg); color: var(--warn); }
+  .badge.ok { background: transparent; border: 1px solid var(--ok); color: var(--ok); }
+  .actions { margin-top: 16px; display: flex; gap: 8px; }
+  button { flex: 1; font: inherit; padding: 10px; border-radius: 8px; border: 1px solid var(--rule);
+           background: var(--paper); color: var(--ink); }
+  .error { padding: 20px 18px; }
+  footer { margin-top: 12px; text-align: center; }
+  footer a, .linkbtn { color: inherit; }
+  .saved { margin-top: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+  .linkbtn { flex: none; padding: 0; border: 0; background: none; font: inherit; text-decoration: underline; cursor: pointer; }
+  ul.list { list-style: none; padding: 0; margin: 16px 0 0; }
+  ul.list a { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--rule);
+              color: inherit; text-decoration: none; font-variant-numeric: tabular-nums; }
+  @media print { body { background: #fff; } .actions, footer, .badge, .saved { display: none; } .paper { box-shadow: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div id="out" class="paper"><p class="muted">Henter kvittering…</p></div>
+  <footer class="muted"><span id="note"></span> <a href="#mine" id="mine">Mine kvitteringer</a></footer>
+</main>
+<script>
+"use strict";
+// Kvittering-i-linket (D6): #r1.<base64url(raw deflate(kanonisk JSON))>. Se format/README.md.
+const PREFIX = "r1.";
+const out = document.getElementById("out");
+const kr = (ore) => (ore / 100).toLocaleString("da-DK", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Vægt- og målvarer: qty i g, ml eller mm, price pr. kg, l eller m (D5).
+const MEASURED = { g: "kg", ml: "l", mm: "m" };
+const qtyText = (l) => MEASURED[l.unit]
+  ? `${(l.qty / 1000).toLocaleString("da-DK", { minimumFractionDigits: 3 })} ${MEASURED[l.unit]} × ${kr(l.price)} pr. ${MEASURED[l.unit]}`
+  : `${l.qty} stk. × ${kr(l.price)}`;
+const note = document.getElementById("note");
+const mine = document.getElementById("mine");
+const METHOD = { card: "Kort", cash: "Kontant", mobilepay: "MobilePay", giftcard: "Gavekort" };
+
+async function decode(fragment) {
+  if (!fragment.startsWith(PREFIX)) throw new Error("Linket indeholder ikke en kvittering.");
+  if (typeof DecompressionStream === "undefined") throw new Error("Browseren kan ikke pakke kvitteringen ud (mangler DecompressionStream).");
+  const b64 = fragment.slice(PREFIX.length).replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return JSON.parse(await new Response(stream).text());
+}
+
+function render(r) {
+  const issued = new Date(r.issued);
+  const date = issued.toLocaleString("da-DK", { dateStyle: "long", timeStyle: "short" });
+  const lines = r.lines.map((l) => {
+    const detail = l.unit || l.qty !== 1
+      ? `<div class="sub">${esc(qtyText(l))}</div>` : "";
+    const disc = l.discount ? `<div class="sub">Rabat −${kr(l.discount)}</div>` : "";
+    return `<tr><td>${esc(l.name)}${detail}${disc}</td><td class="amt">${kr(l.amount)}</td></tr>`;
+  }).join("");
+  const vat = r.totals.vat.map((v) =>
+    `<tr class="vat"><td>Moms ${v.rate / 100} % af ${kr(v.base)}</td><td class="amt">${kr(v.amount)}</td></tr>`).join("");
+  const pay = r.payments.map((p) =>
+    `<tr class="vat"><td>${METHOD[p.method] || esc(p.method)}${p.card ? " " + esc(p.card) : ""}</td><td class="amt">${kr(p.amount)}</td></tr>` +
+    (p.change ? `<tr class="vat"><td>Byttepenge</td><td class="amt">${kr(p.change)}</td></tr>` : "")).join("");
+  const sig = r.sig
+    ? `<div class="badge">Kvitteringen er signeret af butikken (nøgle ${esc(r.sig.kid)}), men signaturen tjekkes ikke endnu.</div>`
+    : `<div class="badge">Kvitteringen er ikke signeret. Prototype.</div>`;
+  out.innerHTML = `
+    <h1>${esc(r.store.name)}</h1>
+    <div class="muted">${esc(r.store.address)} · CVR ${esc(r.store.cvr)}</div>
+    <div class="meta"><span>${esc(date)}</span><span>${esc(r.register)} · nr. ${r.no}</span></div>
+    <table>
+      ${lines}
+      <tr class="total"><td>Total ${esc(r.currency)}</td><td class="amt">${kr(r.totals.total)}</td></tr>
+      ${vat}
+      ${pay}
+    </table>
+    ${sig}
+    <div class="actions"><button id="print">Gem som PDF</button><button id="share">Del</button></div>`;
+  document.title = `Kvittering, ${r.store.name}`;
+  document.getElementById("print").onclick = () => window.print();
+  const share = document.getElementById("share");
+  if (navigator.share) share.onclick = () => navigator.share({ title: document.title, url: location.href }).catch(() => {});
+  else share.remove();
+}
+
+// Mine kvitteringer (D8): linkene gemmes i browserens lager på denne telefon.
+// Linket er selve kvitteringen (inkl. signatur fra M3), så det kan tjekkes igen senere.
+// Intet sendes til en server. Lageret kan være utilgængeligt (privat vindue) eller ryddet,
+// så alt herunder fejler stille, og kvitteringen vises uanset.
+const KEY = "nfcr.kvitteringer.v1";
+
+function loadSaved() {
+  try {
+    const v = JSON.parse(localStorage.getItem(KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+
+function storeSaved(list) {
+  try { localStorage.setItem(KEY, JSON.stringify(list)); return true; } catch { return false; }
+}
+
+// Nøglen er hele linket, så en anden kvittering med samme id aldrig overskriver en gemt.
+function remember(r, fragment) {
+  const list = loadSaved().filter((e) => e.f !== fragment);
+  list.push({ f: fragment, store: r.store.name, issued: r.issued, total: r.totals.total });
+  list.sort((a, b) => Date.parse(b.issued) - Date.parse(a.issued));
+  if (!storeSaved(list)) return false;
+  // Beder browseren om ikke at rydde lageret ved pladsmangel. Ikke garanteret.
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  return true;
+}
+
+function forget(fragment) {
+  return storeSaved(loadSaved().filter((e) => e.f !== fragment));
+}
+
+function savedNote(fragment, ok) {
+  const div = document.createElement("div");
+  div.className = "saved";
+  if (!ok) {
+    div.innerHTML = `<span>Kunne ikke gemmes på telefonen. Brug "Gem som PDF" eller "Del".</span>`;
+  } else {
+    div.innerHTML = `<span>Gemt på denne telefon under Mine kvitteringer.</span><button class="linkbtn">Fjern</button>`;
+    div.querySelector("button").onclick = () => {
+      forget(fragment);
+      div.innerHTML = `<span>Fjernet fra Mine kvitteringer.</span>`;
+    };
+  }
+  out.appendChild(div);
+}
+
+function showList() {
+  const list = loadSaved();
+  const items = list.map((e) => {
+    const d = new Date(e.issued).toLocaleString("da-DK", { dateStyle: "medium", timeStyle: "short" });
+    return `<li><a href="#${esc(e.f)}"><span>${esc(e.store)}<br><span class="sub">${esc(d)}</span></span><span>${kr(e.total)}</span></a></li>`;
+  }).join("");
+  out.innerHTML = `
+    <h1>Mine kvitteringer</h1>
+    <div class="muted">Gemt i browseren på denne telefon. Rydder du browserens data, forsvinder de.</div>
+    ${list.length ? `<ul class="list">${items}</ul><div class="saved"><span>${list.length} kvittering${list.length === 1 ? "" : "er"}</span><button class="linkbtn" id="clear">Slet alle</button></div>`
+                  : `<p>Ingen gemte kvitteringer på denne telefon endnu.</p>`}`;
+  const clear = document.getElementById("clear");
+  if (clear) clear.onclick = () => { if (confirm("Slet alle gemte kvitteringer på denne telefon?")) { storeSaved([]); showList(); } };
+  document.title = "Mine kvitteringer";
+  note.textContent = "";
+  mine.hidden = true;
+}
+
+async function show() {
+  out.classList.remove("error");
+  try {
+    if (location.hash.startsWith("#test.")) {  // receipt.py linktest: vis længden, så afkortning kan ses
+      const n = location.href.length;
+      out.innerHTML = `<h1>Testlink modtaget</h1><p>${n} tegn. Slutter med END: <strong>${location.hash.endsWith("END") ? "ja" : "nej"}</strong></p>`;
+      return;
+    }
+    mine.hidden = false;
+    note.textContent = "Kvitteringen er læst fra linket og blev ikke hentet fra en server.";
+    const fragment = decodeURIComponent(location.hash.slice(1));
+    if (fragment === "" || fragment === "mine") return showList();
+    const r = await decode(fragment);
+    render(r);
+    savedNote(fragment, remember(r, fragment));
+  } catch (e) {
+    out.classList.add("error");
+    out.innerHTML = `<h1>Kvitteringen kan ikke vises</h1><p class="muted">${esc(e.message)}</p>`;
+    console.error(e);
+  }
+}
+
+show();
+// Et nyt link til samme side ændrer kun #-delen og genindlæser ikke siden.
+window.addEventListener("hashchange", show);
+</script>
+</body>
+</html>
